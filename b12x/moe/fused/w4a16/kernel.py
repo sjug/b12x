@@ -7754,12 +7754,10 @@ class W4A16HybridDirectKernel(W4A16FusedMoeKernel):
 
 _W4A16_HYBRID_MAPPED_GRID188_GRID_X = 188
 _W4A16_HYBRID_MAPPED_GRID188_TARGET_SMS = 188
-_W4A16_HYBRID_MAPPED_GRID188_FC1_TASKS = 128
-_W4A16_HYBRID_MAPPED_GRID188_FC2_TASKS = 768
 _W4A16_HYBRID_MAPPED_GRID48_GRID_X = 48
 _W4A16_HYBRID_MAPPED_GRID48_TARGET_SMS = 48
-_W4A16_HYBRID_MAPPED_GRID48_FC1_TASKS = 128
-_W4A16_HYBRID_MAPPED_GRID48_FC2_TASKS = 768
+_W4A16_HYBRID_MAPPED_FC1_TASKS = 128
+_W4A16_HYBRID_MAPPED_FC2_TASKS = 768
 
 
 def _hybrid_direct_query_kernel_resources(
@@ -7953,8 +7951,8 @@ def _w4a16_hybrid_mapped_task_map(
 
     task_count = int(task_count)
     if task_count not in (
-        _W4A16_HYBRID_MAPPED_GRID188_FC1_TASKS,
-        _W4A16_HYBRID_MAPPED_GRID188_FC2_TASKS,
+        _W4A16_HYBRID_MAPPED_FC1_TASKS,
+        _W4A16_HYBRID_MAPPED_FC2_TASKS,
     ):
         raise ValueError(f"mapped {profile_name} task_count must be exactly 128 or 768")
     return tuple(
@@ -8002,12 +8000,12 @@ def _w4a16_hybrid_mapped_mapping_proof(
     """Prove exact FC1/FC2 partitions for one mapped-grid profile."""
 
     fc1_by_cta = _w4a16_hybrid_mapped_task_map(
-        _W4A16_HYBRID_MAPPED_GRID188_FC1_TASKS,
+        _W4A16_HYBRID_MAPPED_FC1_TASKS,
         grid_x=grid_x,
         profile_name=profile_name,
     )
     fc2_by_cta = _w4a16_hybrid_mapped_task_map(
-        _W4A16_HYBRID_MAPPED_GRID188_FC2_TASKS,
+        _W4A16_HYBRID_MAPPED_FC2_TASKS,
         grid_x=grid_x,
         profile_name=profile_name,
     )
@@ -8016,17 +8014,17 @@ def _w4a16_hybrid_mapped_mapping_proof(
     fc1_counts = tuple(len(tasks) for tasks in fc1_by_cta)
     fc2_counts = tuple(len(tasks) for tasks in fc2_by_cta)
     if (
-        len(fc1_flat) != _W4A16_HYBRID_MAPPED_GRID188_FC1_TASKS
+        len(fc1_flat) != _W4A16_HYBRID_MAPPED_FC1_TASKS
         or len(set(fc1_flat)) != len(fc1_flat)
-        or set(fc1_flat) != set(range(_W4A16_HYBRID_MAPPED_GRID188_FC1_TASKS))
+        or set(fc1_flat) != set(range(_W4A16_HYBRID_MAPPED_FC1_TASKS))
     ):
         raise AssertionError(
             f"mapped {profile_name} FC1 mapping is not an exact partition"
         )
     if (
-        len(fc2_flat) != _W4A16_HYBRID_MAPPED_GRID188_FC2_TASKS
+        len(fc2_flat) != _W4A16_HYBRID_MAPPED_FC2_TASKS
         or len(set(fc2_flat)) != len(fc2_flat)
-        or set(fc2_flat) != set(range(_W4A16_HYBRID_MAPPED_GRID188_FC2_TASKS))
+        or set(fc2_flat) != set(range(_W4A16_HYBRID_MAPPED_FC2_TASKS))
     ):
         raise AssertionError(
             f"mapped {profile_name} FC2 mapping is not an exact partition"
@@ -8122,34 +8120,6 @@ def _hybrid_mapped_validate_current_device(
             f"device: {int(max_shared_mem)} != {device_max_shared_mem}"
         )
     return device, device_max_shared_mem
-
-
-def _hybrid_mapped_grid188_validate_current_device(
-    *,
-    sms: int,
-    max_shared_mem: int,
-) -> tuple[int, int]:
-    return _hybrid_mapped_validate_current_device(
-        profile_name="grid188",
-        target_capability=(12, 0),
-        target_sms=_W4A16_HYBRID_MAPPED_GRID188_TARGET_SMS,
-        sms=sms,
-        max_shared_mem=max_shared_mem,
-    )
-
-
-def _hybrid_mapped_grid48_validate_current_device(
-    *,
-    sms: int,
-    max_shared_mem: int,
-) -> tuple[int, int]:
-    return _hybrid_mapped_validate_current_device(
-        profile_name="grid48",
-        target_capability=(12, 1),
-        target_sms=_W4A16_HYBRID_MAPPED_GRID48_TARGET_SMS,
-        sms=sms,
-        max_shared_mem=max_shared_mem,
-    )
 
 
 class W4A16HybridMappedGrid188Kernel(W4A16HybridDirectKernel):
