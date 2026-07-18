@@ -5472,6 +5472,9 @@ def clear_w4a16_kernel_cache() -> None:
     grid188_kernel = globals().get("W4A16HybridMappedGrid188Kernel")
     if grid188_kernel is not None:
         grid188_kernel._COMPILE_CACHE.clear()
+    grid48_kernel = globals().get("W4A16HybridMappedGrid48Kernel")
+    if grid48_kernel is not None:
+        grid48_kernel._COMPILE_CACHE.clear()
 
 
 def compile_w4a16_activation(
@@ -7175,6 +7178,7 @@ class W4A16HybridDirectKernel(W4A16FusedMoeKernel):
     ROUTE_SLOTS = 32
     SCRATCH_ELEMENTS = 2_097_152
     GRID_X = 128
+    TARGET_CAPABILITY = (12, 0)
     WORKSPACE_LOCK_WORDS_PER_SM = 4
 
     def __init__(
@@ -7214,19 +7218,22 @@ class W4A16HybridDirectKernel(W4A16FusedMoeKernel):
             )
         if int(sms) < self.GRID_X:
             raise ValueError(
-                "W4A16 hybrid direct v1 requires at least 128 SMs for its "
-                "128-CTA software-barrier grid"
+                "W4A16 hybrid direct v1 requires at least "
+                f"{self.GRID_X} SMs for its {self.GRID_X}-CTA "
+                "software-barrier grid"
             )
         if torch.cuda.is_available():
             props = torch.cuda.get_device_properties(torch.cuda.current_device())
-            if (int(props.major), int(props.minor)) != (12, 0):
+            target_capability = tuple(int(v) for v in self.TARGET_CAPABILITY)
+            if (int(props.major), int(props.minor)) != target_capability:
                 raise ValueError(
-                    "W4A16 hybrid direct v1 requires SM120, got "
+                    "W4A16 hybrid direct v1 requires "
+                    f"SM{target_capability[0]}{target_capability[1]}, got "
                     f"SM{int(props.major)}{int(props.minor)}"
                 )
             if int(sms) != int(props.multi_processor_count):
                 raise ValueError(
-                    "W4A16 hybrid direct sms must match the current SM120 device: "
+                    "W4A16 hybrid direct sms must match the current device: "
                     f"{int(sms)} != {int(props.multi_processor_count)}"
                 )
             device_max_shared_mem = int(
@@ -7239,7 +7246,7 @@ class W4A16HybridDirectKernel(W4A16FusedMoeKernel):
             if int(max_shared_mem) != device_max_shared_mem:
                 raise ValueError(
                     "W4A16 hybrid direct max_shared_mem must match the current "
-                    f"SM120 device: {int(max_shared_mem)} != {device_max_shared_mem}"
+                    f"device: {int(max_shared_mem)} != {device_max_shared_mem}"
                 )
 
         self.size_m = 4
@@ -7724,6 +7731,10 @@ _W4A16_HYBRID_MAPPED_GRID188_GRID_X = 188
 _W4A16_HYBRID_MAPPED_GRID188_TARGET_SMS = 188
 _W4A16_HYBRID_MAPPED_GRID188_FC1_TASKS = 128
 _W4A16_HYBRID_MAPPED_GRID188_FC2_TASKS = 768
+_W4A16_HYBRID_MAPPED_GRID48_GRID_X = 48
+_W4A16_HYBRID_MAPPED_GRID48_TARGET_SMS = 48
+_W4A16_HYBRID_MAPPED_GRID48_FC1_TASKS = 128
+_W4A16_HYBRID_MAPPED_GRID48_FC2_TASKS = 768
 
 
 def _hybrid_direct_query_kernel_resources(
@@ -7907,39 +7918,73 @@ def _hybrid_mapped_validate_aliases(
                 )
 
 
-def w4a16_hybrid_mapped_grid188_task_map(
+def _w4a16_hybrid_mapped_task_map(
     task_count: int,
+    *,
+    grid_x: int,
+    profile_name: str,
 ) -> tuple[tuple[int, ...], ...]:
-    """Return the exact task=cta+wave*188 assignment for every CTA."""
+    """Return the exact task=cta+wave*grid_x assignment for every CTA."""
 
     task_count = int(task_count)
     if task_count not in (
         _W4A16_HYBRID_MAPPED_GRID188_FC1_TASKS,
         _W4A16_HYBRID_MAPPED_GRID188_FC2_TASKS,
     ):
-        raise ValueError("mapped grid188 task_count must be exactly 128 or 768")
+        raise ValueError(f"mapped {profile_name} task_count must be exactly 128 or 768")
     return tuple(
         tuple(
-            cta + wave * _W4A16_HYBRID_MAPPED_GRID188_GRID_X
-            for wave in range(
-                (task_count - cta + _W4A16_HYBRID_MAPPED_GRID188_GRID_X - 1)
-                // _W4A16_HYBRID_MAPPED_GRID188_GRID_X
-            )
+            cta + wave * grid_x
+            for wave in range((task_count - cta + grid_x - 1) // grid_x)
         )
         if cta < task_count
         else ()
-        for cta in range(_W4A16_HYBRID_MAPPED_GRID188_GRID_X)
+        for cta in range(grid_x)
     )
 
 
-def w4a16_hybrid_mapped_grid188_mapping_proof() -> dict[str, object]:
-    """Prove exact FC1/FC2 partitions and their grid188 CTA counts."""
+def w4a16_hybrid_mapped_grid188_task_map(
+    task_count: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Return the exact task=cta+wave*188 assignment for every CTA."""
 
-    fc1_by_cta = w4a16_hybrid_mapped_grid188_task_map(
-        _W4A16_HYBRID_MAPPED_GRID188_FC1_TASKS
+    return _w4a16_hybrid_mapped_task_map(
+        task_count,
+        grid_x=_W4A16_HYBRID_MAPPED_GRID188_GRID_X,
+        profile_name="grid188",
     )
-    fc2_by_cta = w4a16_hybrid_mapped_grid188_task_map(
-        _W4A16_HYBRID_MAPPED_GRID188_FC2_TASKS
+
+
+def w4a16_hybrid_mapped_grid48_task_map(
+    task_count: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Return the exact task=cta+wave*48 assignment for every CTA."""
+
+    return _w4a16_hybrid_mapped_task_map(
+        task_count,
+        grid_x=_W4A16_HYBRID_MAPPED_GRID48_GRID_X,
+        profile_name="grid48",
+    )
+
+
+def _w4a16_hybrid_mapped_mapping_proof(
+    *,
+    grid_x: int,
+    profile_name: str,
+    expected_fc1_counts: tuple[int, ...],
+    expected_fc2_counts: tuple[int, ...],
+) -> dict[str, object]:
+    """Prove exact FC1/FC2 partitions for one mapped-grid profile."""
+
+    fc1_by_cta = _w4a16_hybrid_mapped_task_map(
+        _W4A16_HYBRID_MAPPED_GRID188_FC1_TASKS,
+        grid_x=grid_x,
+        profile_name=profile_name,
+    )
+    fc2_by_cta = _w4a16_hybrid_mapped_task_map(
+        _W4A16_HYBRID_MAPPED_GRID188_FC2_TASKS,
+        grid_x=grid_x,
+        profile_name=profile_name,
     )
     fc1_flat = tuple(task for tasks in fc1_by_cta for task in tasks)
     fc2_flat = tuple(task for tasks in fc2_by_cta for task in tasks)
@@ -7950,27 +7995,108 @@ def w4a16_hybrid_mapped_grid188_mapping_proof() -> dict[str, object]:
         or len(set(fc1_flat)) != len(fc1_flat)
         or set(fc1_flat) != set(range(_W4A16_HYBRID_MAPPED_GRID188_FC1_TASKS))
     ):
-        raise AssertionError("mapped grid188 FC1 mapping is not an exact partition")
+        raise AssertionError(
+            f"mapped {profile_name} FC1 mapping is not an exact partition"
+        )
     if (
         len(fc2_flat) != _W4A16_HYBRID_MAPPED_GRID188_FC2_TASKS
         or len(set(fc2_flat)) != len(fc2_flat)
         or set(fc2_flat) != set(range(_W4A16_HYBRID_MAPPED_GRID188_FC2_TASKS))
     ):
-        raise AssertionError("mapped grid188 FC2 mapping is not an exact partition")
-    if fc1_counts != (1,) * 128 + (0,) * 60:
-        raise AssertionError("mapped grid188 FC1 must be 128x1+60x0")
-    if fc2_counts != (5,) * 16 + (4,) * 172:
-        raise AssertionError("mapped grid188 FC2 must be 16x5+172x4")
+        raise AssertionError(
+            f"mapped {profile_name} FC2 mapping is not an exact partition"
+        )
+    if fc1_counts != expected_fc1_counts:
+        raise AssertionError(f"mapped {profile_name} FC1 schedule changed")
+    if fc2_counts != expected_fc2_counts:
+        raise AssertionError(f"mapped {profile_name} FC2 schedule changed")
     return {
-        "grid_x": _W4A16_HYBRID_MAPPED_GRID188_GRID_X,
+        "grid_x": grid_x,
         "fc1_tasks": fc1_flat,
         "fc2_tasks": fc2_flat,
         "fc1_per_cta_counts": fc1_counts,
         "fc2_per_cta_counts": fc2_counts,
-        "fc1_waves": 1,
-        "fc2_waves": 5,
-        "fc1_idle_ctas": tuple(range(128, 188)),
+        "fc1_waves": max(fc1_counts),
+        "fc2_waves": max(fc2_counts),
+        "fc1_idle_ctas": tuple(
+            cta for cta, count in enumerate(fc1_counts) if count == 0
+        ),
     }
+
+
+def w4a16_hybrid_mapped_grid188_mapping_proof() -> dict[str, object]:
+    """Prove exact FC1/FC2 partitions and their Grid188 CTA counts."""
+
+    return _w4a16_hybrid_mapped_mapping_proof(
+        grid_x=_W4A16_HYBRID_MAPPED_GRID188_GRID_X,
+        profile_name="grid188",
+        expected_fc1_counts=(1,) * 128 + (0,) * 60,
+        expected_fc2_counts=(5,) * 16 + (4,) * 172,
+    )
+
+
+def w4a16_hybrid_mapped_grid48_mapping_proof() -> dict[str, object]:
+    """Prove exact FC1/FC2 partitions and their Grid48 CTA counts."""
+
+    return _w4a16_hybrid_mapped_mapping_proof(
+        grid_x=_W4A16_HYBRID_MAPPED_GRID48_GRID_X,
+        profile_name="grid48",
+        expected_fc1_counts=(3,) * 32 + (2,) * 16,
+        expected_fc2_counts=(16,) * 48,
+    )
+
+
+def _hybrid_mapped_validate_current_device(
+    *,
+    profile_name: str,
+    target_capability: tuple[int, int],
+    target_sms: int,
+    sms: int,
+    max_shared_mem: int,
+) -> tuple[int, int]:
+    """Fail closed unless the current device matches a mapped-grid profile."""
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(f"W4A16 hybrid mapped {profile_name} requires CUDA")
+    device = int(torch.cuda.current_device())
+    props = torch.cuda.get_device_properties(device)
+    capability = (int(props.major), int(props.minor))
+    if capability != target_capability:
+        raise RuntimeError(
+            f"W4A16 hybrid mapped {profile_name} requires exact "
+            f"SM{target_capability[0]}{target_capability[1]}, got "
+            f"SM{capability[0]}{capability[1]}"
+        )
+    detected_sms = int(props.multi_processor_count)
+    if detected_sms != target_sms:
+        raise RuntimeError(
+            f"W4A16 hybrid mapped {profile_name} requires exactly "
+            f"{target_sms} SMs, got {detected_sms}"
+        )
+    if int(sms) != detected_sms:
+        raise RuntimeError(
+            f"W4A16 hybrid mapped {profile_name} sms must match the current device: "
+            f"{int(sms)} != {detected_sms}"
+        )
+    device_max_shared_mem_value = getattr(props, "shared_memory_per_block_optin", None)
+    if device_max_shared_mem_value is None:
+        raise RuntimeError(
+            f"W4A16 hybrid mapped {profile_name} cannot determine "
+            "shared-memory capacity"
+        )
+    device_max_shared_mem = int(device_max_shared_mem_value)
+    if device_max_shared_mem <= 0:
+        raise RuntimeError(
+            f"W4A16 hybrid mapped {profile_name} has invalid "
+            "shared-memory capacity: "
+            f"{device_max_shared_mem}"
+        )
+    if int(max_shared_mem) != device_max_shared_mem:
+        raise RuntimeError(
+            f"W4A16 hybrid mapped {profile_name} max_shared_mem must match the current "
+            f"device: {int(max_shared_mem)} != {device_max_shared_mem}"
+        )
+    return device, device_max_shared_mem
 
 
 def _hybrid_mapped_grid188_validate_current_device(
@@ -7978,52 +8104,43 @@ def _hybrid_mapped_grid188_validate_current_device(
     sms: int,
     max_shared_mem: int,
 ) -> tuple[int, int]:
-    """Fail closed unless the current device is the exact SM120/188 target."""
+    return _hybrid_mapped_validate_current_device(
+        profile_name="grid188",
+        target_capability=(12, 0),
+        target_sms=_W4A16_HYBRID_MAPPED_GRID188_TARGET_SMS,
+        sms=sms,
+        max_shared_mem=max_shared_mem,
+    )
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("W4A16 hybrid mapped grid188 requires CUDA")
-    device = int(torch.cuda.current_device())
-    props = torch.cuda.get_device_properties(device)
-    capability = (int(props.major), int(props.minor))
-    if capability != (12, 0):
-        raise RuntimeError(
-            "W4A16 hybrid mapped grid188 requires exact SM120, got "
-            f"SM{capability[0]}{capability[1]}"
-        )
-    detected_sms = int(props.multi_processor_count)
-    if detected_sms != _W4A16_HYBRID_MAPPED_GRID188_TARGET_SMS:
-        raise RuntimeError(
-            f"W4A16 hybrid mapped grid188 requires exactly 188 SMs, got {detected_sms}"
-        )
-    if int(sms) != detected_sms:
-        raise RuntimeError(
-            "W4A16 hybrid mapped grid188 sms must match the current device: "
-            f"{int(sms)} != {detected_sms}"
-        )
-    device_max_shared_mem_value = getattr(props, "shared_memory_per_block_optin", None)
-    if device_max_shared_mem_value is None:
-        raise RuntimeError(
-            "W4A16 hybrid mapped grid188 cannot determine shared-memory capacity"
-        )
-    device_max_shared_mem = int(device_max_shared_mem_value)
-    if device_max_shared_mem <= 0:
-        raise RuntimeError(
-            "W4A16 hybrid mapped grid188 has invalid shared-memory capacity: "
-            f"{device_max_shared_mem}"
-        )
-    if int(max_shared_mem) != device_max_shared_mem:
-        raise RuntimeError(
-            "W4A16 hybrid mapped grid188 max_shared_mem must match the current "
-            f"device: {int(max_shared_mem)} != {device_max_shared_mem}"
-        )
-    return device, device_max_shared_mem
+
+def _hybrid_mapped_grid48_validate_current_device(
+    *,
+    sms: int,
+    max_shared_mem: int,
+) -> tuple[int, int]:
+    return _hybrid_mapped_validate_current_device(
+        profile_name="grid48",
+        target_capability=(12, 1),
+        target_sms=_W4A16_HYBRID_MAPPED_GRID48_TARGET_SMS,
+        sms=sms,
+        max_shared_mem=max_shared_mem,
+    )
 
 
 class W4A16HybridMappedGrid188Kernel(W4A16HybridDirectKernel):
     """Mapped production kernel launched with exactly 188 CTAs."""
 
+    PROFILE_NAME = "grid188"
+    CANDIDATE = "w4a16_hybrid_mapped_grid188"
+    ARCHITECTURE = "sm120"
+    TARGET_CAPABILITY = (12, 0)
     GRID_X = _W4A16_HYBRID_MAPPED_GRID188_GRID_X
     TARGET_SMS = _W4A16_HYBRID_MAPPED_GRID188_TARGET_SMS
+    FC1_WAVES = 1
+    FC2_WAVES = 5
+    TASK_SCHEDULE = "task=cta+wave*188"
+    FC1_SCHEDULE = "128x1+60x0"
+    FC2_SCHEDULE = "16x5+172x4"
     MAP_SLOTS = 256
     ABI_VERSION = 1
     _COMPILE_CACHE: dict[tuple, W4A16HybridMappedCompileResult] = {}
@@ -8044,7 +8161,10 @@ class W4A16HybridMappedGrid188Kernel(W4A16HybridDirectKernel):
         max_shared_mem: int,
         force_tile_config: tuple[int, int, int, int],
     ):
-        _hybrid_mapped_grid188_validate_current_device(
+        _hybrid_mapped_validate_current_device(
+            profile_name=self.PROFILE_NAME,
+            target_capability=self.TARGET_CAPABILITY,
+            target_sms=self.TARGET_SMS,
             sms=sms,
             max_shared_mem=max_shared_mem,
         )
@@ -8064,17 +8184,19 @@ class W4A16HybridMappedGrid188Kernel(W4A16HybridDirectKernel):
         )
         if self.blocks_per_sm != 1:
             raise RuntimeError(
-                "W4A16 hybrid mapped grid188 requires one resident CTA per SM"
+                f"W4A16 hybrid mapped {self.PROFILE_NAME} requires one "
+                "resident CTA per SM"
             )
         if self.sms * self.blocks_per_sm < self.GRID_X:
             raise RuntimeError(
-                "W4A16 hybrid mapped grid188 cannot keep its whole grid resident"
+                f"W4A16 hybrid mapped {self.PROFILE_NAME} cannot keep its "
+                "whole grid resident"
             )
 
     @property
     def __cache_key__(self) -> tuple[object, ...]:
         return (
-            "w4a16_hybrid_mapped_grid188",
+            self.CANDIDATE,
             self.ABI_VERSION,
             self.MAP_SLOTS,
             super().__cache_key__,
@@ -8400,8 +8522,26 @@ class W4A16HybridMappedGrid188Kernel(W4A16HybridDirectKernel):
             work_mn_tile += grid_x
 
 
-def _hybrid_mapped_grid188_admit_residency(
+class W4A16HybridMappedGrid48Kernel(W4A16HybridMappedGrid188Kernel):
+    """Mapped production kernel launched with exactly 48 CTAs on GB10."""
+
+    PROFILE_NAME = "grid48"
+    CANDIDATE = "w4a16_hybrid_mapped_grid48"
+    ARCHITECTURE = "sm121"
+    TARGET_CAPABILITY = (12, 1)
+    GRID_X = _W4A16_HYBRID_MAPPED_GRID48_GRID_X
+    TARGET_SMS = _W4A16_HYBRID_MAPPED_GRID48_TARGET_SMS
+    FC1_WAVES = 3
+    FC2_WAVES = 16
+    TASK_SCHEDULE = "task=cta+wave*48"
+    FC1_SCHEDULE = "32x3+16x2"
+    FC2_SCHEDULE = "48x16"
+    _COMPILE_CACHE: dict[tuple, W4A16HybridMappedCompileResult] = {}
+
+
+def _hybrid_mapped_admit_residency(
     *,
+    kernel_type: type[W4A16HybridMappedGrid188Kernel],
     sms: int,
     max_shared_mem: int,
     grid_x: int,
@@ -8411,57 +8551,70 @@ def _hybrid_mapped_grid188_admit_residency(
     registers_per_thread: int,
     local_memory_bytes: int,
 ) -> tuple[tuple[str, object], ...]:
-    """Admit only resource-complete whole-grid-resident SM120/188 code."""
+    """Admit only resource-complete whole-grid-resident mapped code."""
 
-    if int(sms) != _W4A16_HYBRID_MAPPED_GRID188_TARGET_SMS:
-        raise RuntimeError("mapped grid188 admission requires exactly 188 SMs")
-    if int(grid_x) != _W4A16_HYBRID_MAPPED_GRID188_GRID_X:
-        raise RuntimeError("mapped grid188 admission requires exactly 188 CTAs")
+    profile_name = kernel_type.PROFILE_NAME
+    if int(sms) != kernel_type.TARGET_SMS:
+        raise RuntimeError(
+            f"mapped {profile_name} admission requires exactly "
+            f"{kernel_type.TARGET_SMS} SMs"
+        )
+    if int(grid_x) != kernel_type.GRID_X:
+        raise RuntimeError(
+            f"mapped {profile_name} admission requires exactly "
+            f"{kernel_type.GRID_X} CTAs"
+        )
     if int(blocks_per_sm) != 1:
-        raise RuntimeError("mapped grid188 admission requires one CTA per SM")
+        raise RuntimeError(f"mapped {profile_name} admission requires one CTA per SM")
     if int(cta_threads) != 256:
-        raise RuntimeError("mapped grid188 admission requires 256-thread CTAs")
+        raise RuntimeError(f"mapped {profile_name} admission requires 256-thread CTAs")
     resident_capacity_ctas = int(sms) * int(blocks_per_sm)
     if int(grid_x) != resident_capacity_ctas:
-        raise RuntimeError("mapped grid188 requires exactly one CTA on every SM")
+        raise RuntimeError(
+            f"mapped {profile_name} requires exactly one CTA on every SM"
+        )
     registers_per_thread_value = int(registers_per_thread)
     if not 1 <= registers_per_thread_value <= 255:
         raise RuntimeError(
-            "mapped grid188 admission requires a reported 1..255 registers/thread, "
+            f"mapped {profile_name} admission requires a reported 1..255 "
+            "registers/thread, "
             f"got {registers_per_thread_value}"
         )
     if int(local_memory_bytes) != 0:
-        raise RuntimeError("mapped grid188 admission forbids local memory")
+        raise RuntimeError(f"mapped {profile_name} admission forbids local memory")
     register_bytes_per_cta = registers_per_thread_value * int(cta_threads) * 4
     register_capacity_ctas = _DEVICE_MAX_REG_BYTES // register_bytes_per_cta
     if register_capacity_ctas < 1:
         raise RuntimeError(
-            "mapped grid188 register admission cannot retain one CTA/SM: "
+            f"mapped {profile_name} register admission cannot retain one CTA/SM: "
             f"registers_per_thread={registers_per_thread_value}, "
             f"register_bytes_per_cta={register_bytes_per_cta}, "
             f"register_budget_bytes={_DEVICE_MAX_REG_BYTES}"
         )
     if int(shared_memory_bytes) != 45_184:
         raise RuntimeError(
-            "mapped grid188 admission requires exactly 45,184 shared-memory bytes"
+            f"mapped {profile_name} admission requires exactly 45,184 "
+            "shared-memory bytes"
         )
     if int(shared_memory_bytes) + 1536 > int(max_shared_mem):
-        raise RuntimeError("mapped grid188 exceeds the per-SM shared-memory budget")
+        raise RuntimeError(
+            f"mapped {profile_name} exceeds the per-SM shared-memory budget"
+        )
     return (
-        ("candidate", "w4a16_hybrid_mapped_grid188"),
-        ("architecture", "sm120"),
-        ("abi_version", W4A16HybridMappedGrid188Kernel.ABI_VERSION),
-        ("target_sms", _W4A16_HYBRID_MAPPED_GRID188_TARGET_SMS),
-        ("grid_x", _W4A16_HYBRID_MAPPED_GRID188_GRID_X),
+        ("candidate", kernel_type.CANDIDATE),
+        ("architecture", kernel_type.ARCHITECTURE),
+        ("abi_version", kernel_type.ABI_VERSION),
+        ("target_sms", kernel_type.TARGET_SMS),
+        ("grid_x", kernel_type.GRID_X),
         ("blocks_per_sm", int(blocks_per_sm)),
         ("resident_capacity_ctas", resident_capacity_ctas),
         ("whole_grid_resident", True),
         ("one_cta_per_sm", True),
         ("registers_per_thread_actual", registers_per_thread_value),
         ("shared_memory_bytes_exact", 45_184),
-        ("task_schedule", "task=cta+wave*188"),
-        ("fc1_schedule", "128x1+60x0"),
-        ("fc2_schedule", "16x5+172x4"),
+        ("task_schedule", kernel_type.TASK_SCHEDULE),
+        ("fc1_schedule", kernel_type.FC1_SCHEDULE),
+        ("fc2_schedule", kernel_type.FC2_SCHEDULE),
         ("register_bytes_per_cta", register_bytes_per_cta),
         ("register_budget_bytes", _DEVICE_MAX_REG_BYTES),
         ("register_capacity_ctas", register_capacity_ctas),
@@ -8469,8 +8622,9 @@ def _hybrid_mapped_grid188_admit_residency(
     )
 
 
-def compile_w4a16_hybrid_mapped_grid188(
+def _compile_w4a16_hybrid_mapped(
     *,
+    kernel_type: type[W4A16HybridMappedGrid188Kernel],
     size_m: int,
     hidden_size: int,
     intermediate_size: int,
@@ -8486,12 +8640,16 @@ def compile_w4a16_hybrid_mapped_grid188(
 ) -> W4A16HybridMappedCompileResult:
     """Compile the exact one-grid global-route-map heterogeneous kernel."""
 
-    device, _ = _hybrid_mapped_grid188_validate_current_device(
+    profile_name = kernel_type.PROFILE_NAME
+    device, _ = _hybrid_mapped_validate_current_device(
+        profile_name=profile_name,
+        target_capability=kernel_type.TARGET_CAPABILITY,
+        target_sms=kernel_type.TARGET_SMS,
         sms=sms,
         max_shared_mem=max_shared_mem,
     )
     cutlass_dtype = _cutlass_element_dtype(element_dtype)
-    kernel = W4A16HybridMappedGrid188Kernel(
+    kernel = kernel_type(
         size_m=size_m,
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
@@ -8515,26 +8673,36 @@ def compile_w4a16_hybrid_mapped_grid188(
         kernel.ROUTE_SLOTS,
         kernel.MAP_SLOTS,
     )
-    if fixed_resources != (188, 256, 1, 11_296, 754, 2_097_152, 32, 256):
+    expected_fixed_resources = (
+        kernel_type.GRID_X,
+        256,
+        1,
+        11_296,
+        kernel_type.TARGET_SMS * kernel_type.WORKSPACE_LOCK_WORDS_PER_SM + 2,
+        2_097_152,
+        32,
+        256,
+    )
+    if fixed_resources != expected_fixed_resources:
         raise ValueError(
-            "W4A16 hybrid mapped grid188 v1 fixed resources changed: "
+            f"W4A16 hybrid mapped {profile_name} v1 fixed resources changed: "
             f"{fixed_resources!r}"
         )
 
     cache_key = (
-        "w4a16_hybrid_mapped_grid188",
+        kernel_type.CANDIDATE,
         device,
         int(max_shared_mem),
-        "mapped_grid188_cute_compile_keep_cubin",
+        f"mapped_{profile_name}_cute_compile_keep_cubin",
         kernel.__cache_key__,
     )
-    cached = W4A16HybridMappedGrid188Kernel._COMPILE_CACHE.get(cache_key)
+    cached = kernel_type._COMPILE_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
     compile_spec = KernelCompileSpec.from_key(
-        "moe.w4a16.hybrid_mapped_grid188",
-        W4A16HybridMappedGrid188Kernel.ABI_VERSION,
+        f"moe.w4a16.hybrid_mapped_{profile_name}",
+        kernel_type.ABI_VERSION,
         cache_key,
     )
     a_fake = make_ptr(cutlass_dtype, 16, cute.AddressSpace.gmem, assumed_align=16)
@@ -8576,12 +8744,12 @@ def compile_w4a16_hybrid_mapped_grid188(
     )
     global_topk_ids_fake = cute.runtime.make_fake_compact_tensor(
         cutlass.Int32,
-        (W4A16HybridMappedGrid188Kernel.ROUTE_SLOTS,),
+        (kernel_type.ROUTE_SLOTS,),
         assumed_align=16,
     )
     tier_local_map_fake = cute.runtime.make_fake_compact_tensor(
         cutlass.Int32,
-        (W4A16HybridMappedGrid188Kernel.MAP_SLOTS,),
+        (kernel_type.MAP_SLOTS,),
         assumed_align=16,
     )
     fc1_fake = cute.runtime.make_fake_compact_tensor(
@@ -8642,7 +8810,8 @@ def compile_w4a16_hybrid_mapped_grid188(
     to_executor = getattr(compiled, "to", None)
     if not callable(to_executor):
         raise RuntimeError(
-            "W4A16 hybrid mapped grid188 compile result cannot bind a CuTe executor"
+            f"W4A16 hybrid mapped {profile_name} compile result cannot bind "
+            "a CuTe executor"
         )
     executor = to_executor(device)
     kernel_resources = _hybrid_direct_query_kernel_resources(
@@ -8662,7 +8831,8 @@ def compile_w4a16_hybrid_mapped_grid188(
         kernel_resources,
         getattr(compiled, "__cubin__", None),
     )
-    residency_metadata = _hybrid_mapped_grid188_admit_residency(
+    residency_metadata = _hybrid_mapped_admit_residency(
+        kernel_type=kernel_type,
         sms=kernel.sms,
         max_shared_mem=max_shared_mem,
         grid_x=kernel.GRID_X,
@@ -8673,7 +8843,7 @@ def compile_w4a16_hybrid_mapped_grid188(
         local_memory_bytes=local_memory_bytes,
     )
     codegen_resource_metadata: tuple[tuple[str, object], ...] = residency_metadata + (
-        ("architecture", "sm120"),
+        ("architecture", kernel_type.ARCHITECTURE),
         ("abi_version", kernel.ABI_VERSION),
         ("cta_threads", kernel.cta_threads),
         ("min_blocks_per_mp", kernel.blocks_per_sm),
@@ -8745,8 +8915,8 @@ def compile_w4a16_hybrid_mapped_grid188(
         route_slots=kernel.ROUTE_SLOTS,
         fc1_tasks=128,
         fc2_tasks=768,
-        fc1_waves=1,
-        fc2_waves=5,
+        fc1_waves=kernel_type.FC1_WAVES,
+        fc2_waves=kernel_type.FC2_WAVES,
         activation_rows=32,
         activation_elements=32 * 512,
         barrier_count=2,
@@ -8782,11 +8952,80 @@ def compile_w4a16_hybrid_mapped_grid188(
         map_slots=kernel.MAP_SLOTS,
         abi_version=kernel.ABI_VERSION,
     )
-    W4A16HybridMappedGrid188Kernel._COMPILE_CACHE[cache_key] = result
+    kernel_type._COMPILE_CACHE[cache_key] = result
     return result
 
 
-def _w4a16_hybrid_mapped_grid188_launch_flat(
+def compile_w4a16_hybrid_mapped_grid188(
+    *,
+    size_m: int,
+    hidden_size: int,
+    intermediate_size: int,
+    nv_num_experts: int,
+    nf_num_experts: int,
+    top_k: int,
+    activation: str,
+    element_dtype: str,
+    fast_math: bool,
+    sms: int,
+    max_shared_mem: int,
+    force_tile_config: tuple[int, int, int, int],
+) -> W4A16HybridMappedCompileResult:
+    """Compile the exact SM120/188-CTA mapped hybrid kernel."""
+
+    return _compile_w4a16_hybrid_mapped(
+        kernel_type=W4A16HybridMappedGrid188Kernel,
+        size_m=size_m,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        nv_num_experts=nv_num_experts,
+        nf_num_experts=nf_num_experts,
+        top_k=top_k,
+        activation=activation,
+        element_dtype=element_dtype,
+        fast_math=fast_math,
+        sms=sms,
+        max_shared_mem=max_shared_mem,
+        force_tile_config=force_tile_config,
+    )
+
+
+def compile_w4a16_hybrid_mapped_grid48(
+    *,
+    size_m: int,
+    hidden_size: int,
+    intermediate_size: int,
+    nv_num_experts: int,
+    nf_num_experts: int,
+    top_k: int,
+    activation: str,
+    element_dtype: str,
+    fast_math: bool,
+    sms: int,
+    max_shared_mem: int,
+    force_tile_config: tuple[int, int, int, int],
+) -> W4A16HybridMappedCompileResult:
+    """Compile the exact SM121/48-CTA mapped hybrid kernel."""
+
+    return _compile_w4a16_hybrid_mapped(
+        kernel_type=W4A16HybridMappedGrid48Kernel,
+        size_m=size_m,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        nv_num_experts=nv_num_experts,
+        nf_num_experts=nf_num_experts,
+        top_k=top_k,
+        activation=activation,
+        element_dtype=element_dtype,
+        fast_math=fast_math,
+        sms=sms,
+        max_shared_mem=max_shared_mem,
+        force_tile_config=force_tile_config,
+    )
+
+
+def _w4a16_hybrid_mapped_launch_flat(
+    kernel_type: type[W4A16HybridMappedGrid188Kernel],
     a_input: torch.Tensor,
     nv_w13_i32: torch.Tensor,
     nv_w2_i32: torch.Tensor,
@@ -8828,28 +9067,41 @@ def _w4a16_hybrid_mapped_grid188_launch_flat(
     grid_x: int,
     stream_int: int,
 ) -> None:
+    profile_name = kernel_type.PROFILE_NAME
     if not a_input.is_cuda:
-        raise ValueError("W4A16 hybrid mapped grid188 input must be a CUDA tensor")
+        raise ValueError(
+            f"W4A16 hybrid mapped {profile_name} input must be a CUDA tensor"
+        )
     device_index = a_input.device.index
     if device_index is None:
-        raise ValueError("W4A16 hybrid mapped grid188 input lacks a CUDA device index")
+        raise ValueError(
+            f"W4A16 hybrid mapped {profile_name} input lacks a CUDA device index"
+        )
     current_device = int(torch.cuda.current_device())
     if int(device_index) != current_device:
         raise ValueError(
-            "W4A16 hybrid mapped grid188 input must be on the current CUDA device: "
+            f"W4A16 hybrid mapped {profile_name} input must be on the current "
+            "CUDA device: "
             f"cuda:{int(device_index)} != cuda:{current_device}"
         )
     current_stream_int = int(torch.cuda.current_stream(a_input.device).cuda_stream)
     if int(stream_int) != current_stream_int:
         raise ValueError(
-            "W4A16 hybrid mapped grid188 stream must be the current input-device stream: "
+            f"W4A16 hybrid mapped {profile_name} stream must be the current "
+            "input-device stream: "
             f"{int(stream_int)} != {current_stream_int}"
         )
     if int(m) != 4 or int(size_m) != 4:
-        raise ValueError("W4A16 hybrid mapped grid188 v1 requires m=size_m=4")
-    if int(grid_x) != W4A16HybridMappedGrid188Kernel.GRID_X:
-        raise ValueError("W4A16 hybrid mapped grid188 requires exact grid_x=188")
-    _hybrid_mapped_grid188_validate_current_device(
+        raise ValueError(f"W4A16 hybrid mapped {profile_name} v1 requires m=size_m=4")
+    if int(grid_x) != kernel_type.GRID_X:
+        raise ValueError(
+            f"W4A16 hybrid mapped {profile_name} requires exact "
+            f"grid_x={kernel_type.GRID_X}"
+        )
+    _hybrid_mapped_validate_current_device(
+        profile_name=profile_name,
+        target_capability=kernel_type.TARGET_CAPABILITY,
+        target_sms=kernel_type.TARGET_SMS,
         sms=sms,
         max_shared_mem=max_shared_mem,
     )
@@ -8859,7 +9111,8 @@ def _w4a16_hybrid_mapped_grid188_launch_flat(
         int(fc2_tile_k),
         int(fc2_tile_n),
     )
-    hybrid = compile_w4a16_hybrid_mapped_grid188(
+    hybrid = _compile_w4a16_hybrid_mapped(
+        kernel_type=kernel_type,
         size_m=size_m,
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
@@ -8876,14 +9129,12 @@ def _w4a16_hybrid_mapped_grid188_launch_flat(
 
     resource_metadata = dict(hybrid.codegen_resource_metadata)
     if (
-        hybrid.grid_x != W4A16HybridMappedGrid188Kernel.GRID_X
+        hybrid.grid_x != kernel_type.GRID_X
         or hybrid.blocks_per_sm != 1
-        or resource_metadata.get("candidate") != "w4a16_hybrid_mapped_grid188"
-        or resource_metadata.get("target_sms")
-        != _W4A16_HYBRID_MAPPED_GRID188_TARGET_SMS
-        or resource_metadata.get("grid_x") != _W4A16_HYBRID_MAPPED_GRID188_GRID_X
-        or resource_metadata.get("resident_capacity_ctas")
-        != _W4A16_HYBRID_MAPPED_GRID188_TARGET_SMS
+        or resource_metadata.get("candidate") != kernel_type.CANDIDATE
+        or resource_metadata.get("target_sms") != kernel_type.TARGET_SMS
+        or resource_metadata.get("grid_x") != kernel_type.GRID_X
+        or resource_metadata.get("resident_capacity_ctas") != kernel_type.TARGET_SMS
         or resource_metadata.get("whole_grid_resident") is not True
         or resource_metadata.get("one_cta_per_sm") is not True
         or resource_metadata.get("registers_per_thread_actual")
@@ -8892,11 +9143,13 @@ def _w4a16_hybrid_mapped_grid188_launch_flat(
         or resource_metadata.get("register_bytes_per_cta")
         != hybrid.registers_per_thread * hybrid.cta_threads * 4
         or int(resource_metadata.get("register_capacity_ctas", 0)) < 1
-        or resource_metadata.get("task_schedule") != "task=cta+wave*188"
-        or resource_metadata.get("fc1_schedule") != "128x1+60x0"
-        or resource_metadata.get("fc2_schedule") != "16x5+172x4"
+        or resource_metadata.get("task_schedule") != kernel_type.TASK_SCHEDULE
+        or resource_metadata.get("fc1_schedule") != kernel_type.FC1_SCHEDULE
+        or resource_metadata.get("fc2_schedule") != kernel_type.FC2_SCHEDULE
     ):
-        raise RuntimeError("W4A16 hybrid mapped grid188 lacks exact resource admission")
+        raise RuntimeError(
+            f"W4A16 hybrid mapped {profile_name} lacks exact resource admission"
+        )
 
     tensor_contracts = (
         ("a_input", a_input, torch.bfloat16, 4 * 6144, True, 16, False),
@@ -9157,7 +9410,14 @@ def _w4a16_hybrid_mapped_grid188_launch_op(
     grid_x: int,
     stream_int: int,
 ) -> None:
-    _w4a16_hybrid_mapped_grid188_launch_flat(
+    if int(grid_x) == W4A16HybridMappedGrid188Kernel.GRID_X:
+        kernel_type = W4A16HybridMappedGrid188Kernel
+    elif int(grid_x) == W4A16HybridMappedGrid48Kernel.GRID_X:
+        kernel_type = W4A16HybridMappedGrid48Kernel
+    else:
+        raise ValueError("W4A16 hybrid mapped launch requires exact grid_x=188 or 48")
+    _w4a16_hybrid_mapped_launch_flat(
+        kernel_type,
         a_input,
         nv_w13_i32,
         nv_w2_i32,
@@ -9258,14 +9518,18 @@ __all__ = [
     "W4A16GemmKernel",
     "W4A16TopKSumKernel",
     "W4A16HybridMappedGrid188Kernel",
+    "W4A16HybridMappedGrid48Kernel",
     "clear_w4a16_kernel_cache",
     "compile_w4a16_activation",
     "compile_w4a16_fused_moe",
     "compile_w4a16_gemm",
     "compile_w4a16_topk_sum",
     "compile_w4a16_hybrid_mapped_grid188",
+    "compile_w4a16_hybrid_mapped_grid48",
     "pack_topk_routes_by_expert",
     "run_w4a16_moe",
     "w4a16_hybrid_mapped_grid188_mapping_proof",
     "w4a16_hybrid_mapped_grid188_task_map",
+    "w4a16_hybrid_mapped_grid48_mapping_proof",
+    "w4a16_hybrid_mapped_grid48_task_map",
 ]
